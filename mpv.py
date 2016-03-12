@@ -14,6 +14,8 @@ backend = CDLL('libmpv.so')
 class MpvHandle(c_void_p):
     pass
 
+class MpvOpenGLCbContext(c_void_p):
+    pass
 
 class ErrorCode:
     """ For documentation on these, see mpv's libmpv/client.h """
@@ -102,6 +104,9 @@ class MpvEventID(c_int):
             CLIENT_MESSAGE, VIDEO_RECONFIG, AUDIO_RECONFIG, METADATA_UPDATE, SEEK, PLAYBACK_RESTART, PROPERTY_CHANGE,
             CHAPTER_CHANGE )
 
+class MpvSubApi(c_int):
+    MPV_SUB_API_OPENGL_CB = 1
+
 class MpvEvent(Structure):
     _fields_ = [('event_id', MpvEventID),
                 ('error', c_int),
@@ -161,12 +166,15 @@ class MpvEventClientMessage(Structure):
 
 WakeupCallback = CFUNCTYPE(None, c_void_p)
 
+OpenGlCbUpdateFn = CFUNCTYPE(None, c_void_p)
+OpenGlCbGetProcAddrFn = CFUNCTYPE(None, c_void_p, c_char_p)
 
-def _handle_func(name, args=[], res=None):
+
+def _handle_func(name, args=[], res=None, ctx=[MpvHandle]):
     func = getattr(backend, name)
     if res is not None:
         func.restype = res
-    func.argtypes = [MpvHandle] + args
+    func.argtypes = ctx + args
     def wrapper(*args):
         if res is not None:
             return func(*args)
@@ -226,6 +234,17 @@ _handle_func('mpv_wakeup', [], c_int)
 _handle_func('mpv_set_wakeup_callback', [WakeupCallback, c_void_p], c_int)
 _handle_func('mpv_get_wakeup_pipe', [], c_int)
 
+_handle_func('mpv_get_sub_api', [MpvSubApi], c_void_p)
+
+def _handle_func_cb(name, args=[], res=None):
+    return _handle_func(name, args, res, [MpvOpenGLCbContext])
+
+_handle_func_cb('mpv_opengl_cb_set_update_callback', [OpenGlCbUpdateFn, c_void_p])
+_handle_func_cb('mpv_opengl_cb_init_gl', [c_char_p, OpenGlCbGetProcAddrFn, c_void_p], c_int)
+_handle_func_cb('mpv_opengl_cb_draw', [c_int, c_int, c_int], c_int);
+_handle_func_cb('mpv_opengl_cb_render', [c_int, c_int], c_int);
+_handle_func_cb('mpv_opengl_cb_report_flip', [c_ulonglong], c_int);
+_handle_func_cb('mpv_opengl_cb_uninit_gl', [], c_int);
 
 class ynbool:
     def __init__(self, val=False):
@@ -263,7 +282,7 @@ class MPV:
         """ Create an MPV instance. You should pass in an asyncio event loop that will  handle the mpv event queue via
         the evloop argument. If you do not pass in one, one will be created for you and run in a freshly spawned thread
         (works for prototypes but is likely not what you want).
-        
+
         Any kwargs given will be passed to mpv as options. """
 
         self.handle = _mpv_create()
@@ -299,7 +318,7 @@ class MPV:
         for k,v in kwargs.items():
             _mpv_set_option_string(self.handle, k.replace('_', '-').encode(), istr(v).encode())
         _mpv_initialize(self.handle)
-    
+
     def wait_for_playback(self):
         """ Waits until playback of the current title is paused or done """
         with self._playback_cond:
@@ -327,10 +346,10 @@ class MPV:
 
     def _set_property(self, name, value):
         self.command('set_property', name, str(value))
-    
+
     def _add_property(self, name, value=None):
         self.command('add_property', name, value)
-    
+
     def _cycle_property(self, name, direction='up'):
         self.command('cycle_property', name, direction)
 
@@ -363,7 +382,7 @@ class MPV:
 
     def playlist_move(self, index1, index2):
         self.command('playlist_move', index1, index2)
-    
+
     def run(self, command, *args):
         self.command('run', command, *args)
 
@@ -381,10 +400,10 @@ class MPV:
 
     def sub_reload(self, sub_id=None):
         self.command('sub_reload', sub_id)
-    
+
     def sub_step(self, skip):
         self.command('sub_step', skip)
-    
+
     def sub_seek(self, skip):
         self.command('sub_seek', skip)
 
@@ -399,13 +418,13 @@ class MPV:
 
     def discnav(self, command):
         self.command('discnav', command)
-    
+
     def write_watch_later_config(self):
         self.command('write_watch_later_config')
-    
+
     def overlay_add(self, overlay_id, x, y, file_or_fd, offset, fmt, w, h, stride):
         self.command('overlay_add', overlay_id, x, y, file_or_fd, offset, fmt, w, h, stride)
-    
+
     def overlay_remove(self, overlay_id):
         self.command('overlay_remove', overlay_id)
 
@@ -414,7 +433,7 @@ class MPV:
 
     def script_message_to(self, target, *args):
         self.command('script_message_to', target, *args)
-    
+
     @property
     def metadata(self):
         raise NotImplementedError
@@ -424,7 +443,7 @@ class MPV:
 
     def vf_metadata(self):
         raise NotImplementedError
-    
+
     # Convenience functions
     def play(self, filename):
         self.loadfile(filename)
@@ -479,12 +498,12 @@ class MPV:
     def _get_list(self, prefix, props):
         count = int(_ensure_encoding(_mpv_get_property_string(self.handle, (prefix+'count').encode())))
         return [ self._get_dict(prefix+str(index)+'/', props) for index in range(count)]
-            
+
     # TODO: af, vf properties
     # TODO: edition-list
     # TODO property-mapped options
 
-    
+
 def bindproperty(MPV, name, proptype, access):
     def getter(self):
         return proptype(_ensure_encoding(_mpv_get_property_string(self.handle, name.encode())))
@@ -603,4 +622,3 @@ for name, proptype, access in (
         ('quvi-format',                 str,    'rw'),
         ('seekable',                    ynbool, 'r')):
     bindproperty(MPV, name, proptype, access)
-
